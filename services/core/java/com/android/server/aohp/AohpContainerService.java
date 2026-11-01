@@ -328,6 +328,24 @@ public final class AohpContainerService extends IAohpContainer.Stub {
     }
 
     @Override
+    public String powerMode(String mode) {
+        enforcePermission();
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            String resp = sendCommand(mode == null || mode.isEmpty() ? "POWER" : "POWER " + mode);
+            if (isOk(resp)) {
+                return okPayload(resp);
+            }
+            return "{\"error\":\"" + resp.replace('"', '\'') + "\"}";
+        } catch (IOException e) {
+            Log.e(TAG, "powerMode failed", e);
+            return "{\"error\":\"" + e.getMessage() + "\"}";
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    @Override
     public String diagnose(String containerName) {
         enforcePermission();
         final long ident = Binder.clearCallingIdentity();
