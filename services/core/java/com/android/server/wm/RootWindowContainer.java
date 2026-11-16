@@ -1165,7 +1165,17 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
     void setWindowManager(WindowManagerService wm) {
         mWindowManager = wm;
         mDisplayManager = mService.mContext.getSystemService(DisplayManager.class);
-        mDisplayManager.registerDisplayListener(this, mService.mUiHandler);
+        // AOHP: ask for state changes too. With display_listener_performance_improvements a
+        // display turning on or off is its own event, which the default filter leaves out. A
+        // display that turned on just after it was added then stayed "off" here: mirroring to it
+        // did not start and the monitor showed black. Refresh rate is named because an explicit
+        // filter no longer adds it.
+        mDisplayManager.registerDisplayListener(this, mService.mUiHandler,
+                DisplayManager.EVENT_TYPE_DISPLAY_ADDED
+                        | DisplayManager.EVENT_TYPE_DISPLAY_CHANGED
+                        | DisplayManager.EVENT_TYPE_DISPLAY_REMOVED
+                        | DisplayManager.EVENT_TYPE_DISPLAY_REFRESH_RATE
+                        | DisplayManager.EVENT_TYPE_DISPLAY_STATE);
         mDisplayManagerInternal = LocalServices.getService(DisplayManagerInternal.class);
 
         final Display[] displays = mDisplayManager.getDisplays();
