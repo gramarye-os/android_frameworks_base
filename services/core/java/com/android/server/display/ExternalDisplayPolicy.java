@@ -19,6 +19,7 @@ package com.android.server.display;
 import static android.hardware.display.DisplayManagerGlobal.EVENT_DISPLAY_CONNECTED;
 import static android.os.Temperature.THROTTLING_CRITICAL;
 import static android.os.Temperature.THROTTLING_NONE;
+import static android.os.Temperature.THROTTLING_SEVERE;
 import static android.view.Display.TYPE_EXTERNAL;
 
 import android.annotation.NonNull;
@@ -47,8 +48,10 @@ import java.util.Set;
 
 /**
  * Listens for Skin thermal sensor events, disables external displays if thermal status becomes
- * equal or above {@link android.os.Temperature#THROTTLING_CRITICAL}, enables external displays if
- * status goes below {@link android.os.Temperature#THROTTLING_CRITICAL}.
+ * equal or above {@link android.os.Temperature#THROTTLING_CRITICAL}, allows external displays
+ * again if status goes below {@link android.os.Temperature#THROTTLING_CRITICAL}.
+ * AOHP: the displays it disabled are enabled again once status goes below
+ * {@link android.os.Temperature#THROTTLING_SEVERE}.
  */
 class ExternalDisplayPolicy {
     private static final String TAG = "ExternalDisplayPolicy";
@@ -113,6 +116,9 @@ class ExternalDisplayPolicy {
     private boolean mIsBootCompleted;
     //@GuardedBy("mSyncRoot")
     private final Set<Integer> mDisplayIdsWaitingForBootCompletion = new HashSet<>();
+    // AOHP: the displays this policy disabled for heat, to enable them again when it has cooled.
+    //@GuardedBy("mSyncRoot")
+    private final Set<Integer> mDisplayIdsDisabledForTemperature = new HashSet<>();
 
     ExternalDisplayPolicy(@NonNull final Injector injector) {
         mInjector = injector;
@@ -194,6 +200,8 @@ class ExternalDisplayPolicy {
             return;
         }
 
+        // AOHP: whoever asks here has decided; cooling down doesn't change this display any more.
+        mDisplayIdsDisabledForTemperature.remove(logicalDisplay.getDisplayIdLocked());
         mLogicalDisplayMapper.setDisplayEnabledLocked(logicalDisplay, enabled);
     }
 
@@ -247,6 +255,7 @@ class ExternalDisplayPolicy {
         // Type of the display here is always UNKNOWN, so we can't verify it is an external display
 
         var displayId = logicalDisplay.getDisplayIdLocked();
+        mDisplayIdsDisabledForTemperature.remove(displayId);
         if (mDisplayIdsWaitingForBootCompletion.remove(displayId)) {
             return;
         }
@@ -325,6 +334,7 @@ class ExternalDisplayPolicy {
         }
 
         mLogicalDisplayMapper.setDisplayEnabledLocked(logicalDisplay, /*enabled=*/ false);
+        mDisplayIdsDisabledForTemperature.add(logicalDisplay.getDisplayIdLocked());
 
         mExternalDisplayStatsService.onDisplayDisabled(logicalDisplay.getDisplayIdLocked());
 
@@ -364,6 +374,27 @@ class ExternalDisplayPolicy {
     private void disableExternalDisplays() {
         synchronized (mSyncRoot) {
             mLogicalDisplayMapper.forEachLocked(this::disableExternalDisplayLocked);
+        }
+    }
+
+    /**
+     * AOHP: enables the displays that were disabled for heat and are still connected. Stock
+     * Android only allows them again and leaves them off; with no dialog asking at that point,
+     * a monitor stayed dark until it was plugged in again or the device restarted.
+     */
+    private void enableExternalDisplaysDisabledForTemperature() {
+        synchronized (mSyncRoot) {
+            final var displayIds = mDisplayIdsDisabledForTemperature.toArray(new Integer[0]);
+            mDisplayIdsDisabledForTemperature.clear();
+            for (var displayId : displayIds) {
+                final var logicalDisplay = mLogicalDisplayMapper.getDisplayLocked(displayId);
+                if (logicalDisplay == null || logicalDisplay.isEnabledLocked()) {
+                    continue;
+                }
+                Slog.i(TAG, "External display " + displayId + " is enabled again:"
+                        + " the device has cooled down.");
+                mLogicalDisplayMapper.setDisplayEnabledLocked(logicalDisplay, /*enabled=*/ true);
+            }
         }
     }
 
@@ -415,6 +446,10 @@ class ExternalDisplayPolicy {
             mStatus = newStatus;
             if (THROTTLING_CRITICAL > previousStatus && THROTTLING_CRITICAL <= newStatus) {
                 disableExternalDisplays();
+            } else if (THROTTLING_SEVERE <= previousStatus && THROTTLING_SEVERE > newStatus) {
+                // AOHP: not as soon as it is below critical, or a display would go off and on
+                // while the temperature stays near that line.
+                enableExternalDisplaysDisabledForTemperature();
             }
         }
     }
