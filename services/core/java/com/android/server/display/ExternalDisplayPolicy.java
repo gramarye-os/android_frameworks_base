@@ -63,6 +63,17 @@ class ExternalDisplayPolicy {
     @VisibleForTesting
     static final String ENABLE_ON_CONNECT = "persist.sys.display.enable_on_connect.external";
 
+    /**
+     * AOHP: heat only turns external displays off when this is true. Stock Android always does
+     * it at critical skin temperature. A docked device then shows a dark monitor with the
+     * reason only on its own screen, which looks like a hardware failure, and in a test the
+     * temperature did not fall while the load went on. CPU and GPU throttling and thermal
+     * shutdown are not changed by this. To get the stock behaviour:
+     * 'adb shell setprop persist.debug.display.external_thermal_cutoff true'
+     */
+    @VisibleForTesting
+    static final String THERMAL_CUTOFF = "persist.debug.display.external_thermal_cutoff";
+
     static boolean isExternalDisplayLocked(@NonNull final LogicalDisplay logicalDisplay) {
         return logicalDisplay.getDisplayInfoLocked().type == TYPE_EXTERNAL;
     }
@@ -349,6 +360,9 @@ class ExternalDisplayPolicy {
      */
     @VisibleForTesting
     boolean isExternalDisplayAllowed() {
+        if (!SystemProperties.getBoolean(THERMAL_CUTOFF, false)) {
+            return true;
+        }
         return mStatus < THROTTLING_CRITICAL;
     }
 
@@ -445,7 +459,12 @@ class ExternalDisplayPolicy {
             final var previousStatus = mStatus;
             mStatus = newStatus;
             if (THROTTLING_CRITICAL > previousStatus && THROTTLING_CRITICAL <= newStatus) {
-                disableExternalDisplays();
+                if (isExternalDisplayAllowed()) {
+                    Slog.i(TAG, "Skin temperature is critical; external displays stay on ("
+                            + THERMAL_CUTOFF + " is not set).");
+                } else {
+                    disableExternalDisplays();
+                }
             } else if (THROTTLING_SEVERE <= previousStatus && THROTTLING_SEVERE > newStatus) {
                 // AOHP: not as soon as it is below critical, or a display would go off and on
                 // while the temperature stays near that line.
