@@ -46,6 +46,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.hardware.usb.IDisplayPortAltModeInfoListener;
 import android.hardware.usb.IUsbOperationInternal;
 import android.hardware.usb.ParcelableUsbPort;
@@ -73,6 +74,7 @@ import android.os.Parcelable;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.provider.Settings;
 import android.service.ServiceProtoEnums;
 import android.service.usb.UsbPortInfoProto;
 import android.service.usb.UsbPortManagerProto;
@@ -180,6 +182,17 @@ public class UsbPortManager implements IBinder.DeathRecipient {
 
     private long mTransactionId;
 
+    /**
+     * AOHP: the user's switch for USB contaminant (moisture) detection, a Settings.Global key.
+     * 1 or unset = on. 0 = off: detection is turned off on every port that has a switch for
+     * it and stays off across unplug and reboot. For cables and host ports that set the
+     * warning off by mistake.
+     */
+    private static final String SETTING_CONTAMINANT_DETECTION = "usb_contaminant_detection";
+
+    // Cached value of SETTING_CONTAMINANT_DETECTION. Guarded by mLock.
+    private boolean mContaminantDetectionWanted = true;
+
     public UsbPortManager(Context context) {
         mContext = context;
         mUsbPortHal = UsbPortHalInstance.getInstance(this, null);
@@ -188,6 +201,7 @@ public class UsbPortManager implements IBinder.DeathRecipient {
 
     public void systemReady() {
         mSystemReady = true;
+        registerContaminantDetectionSetting();
         if (mUsbPortHal != null) {
             mUsbPortHal.systemReady();
             try {
@@ -1180,12 +1194,14 @@ public class UsbPortManager implements IBinder.DeathRecipient {
 
     private void handlePortAddedLocked(PortInfo portInfo, IndentingPrintWriter pw) {
         logAndPrint(Log.INFO, pw, "USB port added: " + portInfo);
+        disableContaminantDetectionIfUnwanted(portInfo, pw);
         handlePortLocked(portInfo, pw);
     }
 
     private void handlePortChangedLocked(PortInfo portInfo, IndentingPrintWriter pw) {
         logAndPrint(Log.INFO, pw, "USB port changed: " + portInfo);
         enableContaminantDetectionIfNeeded(portInfo, pw);
+        disableContaminantDetectionIfUnwanted(portInfo, pw);
         disableLimitPowerTransferIfNeeded(portInfo, pw);
         handlePortLocked(portInfo, pw);
     }
@@ -1316,7 +1332,50 @@ public class UsbPortManager implements IBinder.DeathRecipient {
         }
     }
 
+    private void registerContaminantDetectionSetting() {
+        synchronized (mLock) {
+            mContaminantDetectionWanted = Settings.Global.getInt(mContext.getContentResolver(),
+                    SETTING_CONTAMINANT_DETECTION, 1) != 0;
+        }
+        mContext.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(SETTING_CONTAMINANT_DETECTION), false,
+                new ContentObserver(mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        final boolean wanted = Settings.Global.getInt(
+                                mContext.getContentResolver(),
+                                SETTING_CONTAMINANT_DETECTION, 1) != 0;
+                        synchronized (mLock) {
+                            if (wanted == mContaminantDetectionWanted) {
+                                return;
+                            }
+                            mContaminantDetectionWanted = wanted;
+                            for (PortInfo portInfo : mPorts.values()) {
+                                if (portInfo.mUsbPortStatus != null) {
+                                    enableContaminantDetection(portInfo.mUsbPort.getId(),
+                                            wanted, null);
+                                }
+                            }
+                        }
+                    }
+                });
+    }
+
+    private void disableContaminantDetectionIfUnwanted(PortInfo portInfo,
+            IndentingPrintWriter pw) {
+        if (mContaminantDetectionWanted || portInfo.mUsbPortStatus == null) {
+            return;
+        }
+        // Does nothing for a port that is already off or has no switch.
+        enableContaminantDetection(portInfo.mUsbPort.getId(), false, pw);
+    }
+
     private void enableContaminantDetectionIfNeeded(PortInfo portInfo, IndentingPrintWriter pw) {
+        if (!mContaminantDetectionWanted) {
+            // The user turned detection off; an unplug does not turn it back on.
+            return;
+        }
+
         if (!mConnected.containsKey(portInfo.mUsbPort.getId())) {
             return;
         }
